@@ -2,12 +2,12 @@ const std = @import("std");
 const Self = @This();
 
 // TODO: use any-writer when it exists
-const PointerFormat = *const fn (*anyopaque, options: std.fmt.FormatOptions, std.io.FixedBufferStream(u8)) anyerror!void;
+const PointerFormat = *const fn (*Self, options: std.fmt.FormatOptions, *std.io.FixedBufferStream([]u8)) anyerror!void;
 
 type: []const u8,
 size: usize = 0,
-ptr: *anyopaque,
-ptrFormat: ?PointerFormat = null,
+ptr: ?*anyopaque,
+ptrFormat: PointerFormat,
 
 /// Initializes a runtime anytype from a comptime anytype.
 pub inline fn init(value: anytype) Self {
@@ -17,20 +17,24 @@ pub inline fn init(value: anytype) Self {
 /// Explicitly initialize a runtime anytype to fit the type T.
 pub inline fn initExplicit(comptime T: type, value: T) Self {
     var size: usize = @sizeOf(T);
-    var ptrFormat: ?PointerFormat = null;
-    const ptr: *anyopaque = switch (@typeInfo(T)) {
+    var ptrFormat: PointerFormat = (struct {
+        fn func(t: *Self, options: std.fmt.FormatOptions, stream: *std.io.FixedBufferStream([]u8)) !void {
+            const self: T = try t.cast(T);
+            return std.fmt.formatType(self, "", options, stream.writer(), 3);
+        }
+    }).func;
+
+    const ptr: ?*anyopaque = switch (@typeInfo(T)) {
         .Int, .ComptimeInt => @ptrFromInt(value),
-        .Float, .ComptimeFloat => @ptrFromInt(@as(usize, @bitCast(@as(f128, @floatCast(value))))),
+        .Float, .ComptimeFloat => @ptrFromInt(@as(u64, @bitCast(@as(f64, @floatCast(value))))),
         .Enum => @ptrFromInt(@intFromEnum(value)),
         .Struct, .Union => blk: {
-            if (@hasDecl(T, "format")) {
-                ptrFormat = (struct {
-                    fn func(selfPointer: *anyopaque, options: std.fmt.FormatOptions, stream: std.io.FixedBufferStream(u8)) !void {
-                        const self: *T = @ptrCast(@alignCast(selfPointer));
-                        return self.format("", options, stream.writer());
-                    }
-                }).func;
-            }
+            ptrFormat = (struct {
+                fn func(t: *Self, options: std.fmt.FormatOptions, stream: *std.io.FixedBufferStream([]u8)) !void {
+                    const self: T = try t.cast(T);
+                    return if (@hasDecl(T, "format")) self.format("", options, stream.writer()) else std.fmt.formatType(self, "", options, stream.writer(), 3);
+                }
+            }).func;
             break :blk @constCast(&value);
         },
         .Pointer => |p| switch (@typeInfo(p.child)) {
@@ -61,13 +65,13 @@ pub inline fn cast(self: Self, comptime T: type) error{InvalidCast}!T {
 /// Casts a type without any of the safety
 pub inline fn unsafeCast(self: Self, comptime T: type) T {
     return switch (@typeInfo(T)) {
-        .Int, .ComptimeInt => @intFromPtr(self.ptr),
-        .Float, .ComptimeFloat => @floatCast(@as(f128, @bitCast(self.ptr))),
+        .Int, .ComptimeInt => @intCast(@intFromPtr(self.ptr)),
+        .Float, .ComptimeFloat => @floatCast(@as(f64, @bitCast(@intFromPtr(self.ptr)))),
         .Enum => |e| @enumFromInt(@as(e.tag_type, @ptrFromInt(self.ptr))),
-        .Struct, .Union => @ptrCast(@alignCast(self.ptr)),
+        .Struct, .Union => @as(*T, @ptrCast(@alignCast(self.ptr.?))).*,
         .Pointer => |p| switch (@typeInfo(p.child)) {
             .Array => blk: {
-                break :blk @as([*]p.child, @ptrCast(@alignCast(self.ptr)))[0..self.len(T)];
+                break :blk @as([*]p.child, @ptrCast(@alignCast(self.ptr.?)))[0..self.len(T)];
             },
             else => |f| @compileError("Unsupported pointer type: " ++ @tagName(f)),
         },
@@ -93,8 +97,8 @@ pub inline fn format(self: Self, comptime fmt: []const u8, options: std.fmt.Form
         const trunc_msg = "(msg truncated)";
         var buf: [size + trunc_msg.len]u8 = undefined;
 
-        const stream = std.io.fixedBufferStream(buf[0..size]);
-        ptrFormat(self.ptr, options, stream) catch |err| switch (err) {
+        var stream = std.io.fixedBufferStream(buf[0..size]);
+        ptrFormat(self, options, &stream) catch |err| switch (err) {
             error.NoSpaceLeft => blk: {
                 @memcpy(buf[size..], trunc_msg);
                 break :blk &buf;
@@ -115,12 +119,43 @@ pub inline fn format(self: Self, comptime fmt: []const u8, options: std.fmt.Form
 }
 
 test "Casting integers and floats" {
+    @setEvalBranchQuota(100_000);
     comptime var i: usize = 0;
     inline while (i < std.math.maxInt(u8)) : (i += 1) {
         try std.testing.expectEqual(i, try initExplicit(u8, i).cast(u8));
     }
 
-    try std.testing.expectEqual(123.456, try initExplicit(f32, 123.456).cast(f32));
+    try std.testing.expectEqual(@as(f32, 123.456), try initExplicit(f32, 123.456).cast(f32));
+}
+
+test "Casting structs and unions" {
+    const UnionType = union(enum) {
+        a: u32,
+        b: [2]u16,
+        c: [4]u8,
+    };
+
+    const StructType = struct {
+        a: u32,
+        b: u16,
+        c: u8,
+    };
+
+    try std.testing.expectEqualDeep(UnionType{
+        .a = 4096,
+    }, try initExplicit(UnionType, UnionType{
+        .a = 4096,
+    }).cast(UnionType));
+
+    try std.testing.expectEqualDeep(StructType{
+        .a = 4096,
+        .b = 1024,
+        .c = 255,
+    }, try initExplicit(StructType, StructType{
+        .a = 4096,
+        .b = 1024,
+        .c = 255,
+    }).cast(StructType));
 }
 
 test "Invalid casts" {
