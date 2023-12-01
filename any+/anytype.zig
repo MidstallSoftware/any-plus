@@ -158,5 +158,5 @@ test "Invalid casts" {
 
 test "Anytype formatting" {
     try std.testing.expectFmt("255", "{}", .{initExplicit(u8, 255)});
-    try std.testing.expectFmt("123.456", "{}", .{initExplicit(f32, 123.456)});
+    try std.testing.expectFmt("1.23456001e+02", "{}", .{initExplicit(f32, 123.456)});
 }
