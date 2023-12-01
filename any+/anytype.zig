@@ -1,8 +1,9 @@
 const std = @import("std");
 const Self = @This();
+const Anywriter = @import("anywriter.zig");
 
 // TODO: use any-writer when it exists
-const PointerFormat = *const fn (*const Self, options: std.fmt.FormatOptions, *std.io.FixedBufferStream([]u8)) error{ NoSpaceLeft, InvalidCast }!void;
+const PointerFormat = *const fn (*const Self, options: std.fmt.FormatOptions, Anywriter.Writer) anyerror!void;
 
 type: []const u8,
 size: usize = 0,
@@ -18,9 +19,9 @@ pub inline fn init(value: anytype) Self {
 pub inline fn initExplicit(comptime T: type, value: T) Self {
     var size: usize = @sizeOf(T);
     var ptrFormat: PointerFormat = (struct {
-        fn func(t: *const Self, options: std.fmt.FormatOptions, stream: *std.io.FixedBufferStream([]u8)) !void {
+        fn func(t: *const Self, options: std.fmt.FormatOptions, writer: Anywriter.Writer) !void {
             const self: T = t.cast(T) catch return error.NoSpaceLeft;
-            return std.fmt.formatType(self, "", options, stream.writer(), 3);
+            return std.fmt.formatType(self, "", options, writer, 3);
         }
     }).func;
 
@@ -30,9 +31,9 @@ pub inline fn initExplicit(comptime T: type, value: T) Self {
         .Enum => @ptrFromInt(@intFromEnum(value)),
         .Struct, .Union => blk: {
             ptrFormat = (struct {
-                fn func(t: *const Self, options: std.fmt.FormatOptions, stream: *std.io.FixedBufferStream([]u8)) !void {
+                fn func(t: *const Self, options: std.fmt.FormatOptions, writer: Anywriter.Writer) !void {
                     const self: T = t.cast(T) catch return error.NoSpaceLeft;
-                    return if (@hasDecl(T, "format")) self.format("", options, stream.writer()) else std.fmt.formatType(self, "", options, stream.writer(), 3);
+                    return if (@hasDecl(T, "format")) self.format("", options, writer) else std.fmt.formatType(self, "", options, writer, 3);
                 }
             }).func;
             break :blk @constCast(&value);
@@ -90,25 +91,8 @@ pub inline fn len(self: Self, comptime T: type) usize {
     return @divExact(self.size, size);
 }
 
-pub inline fn format(self: *const Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-    const size = comptime if (std.mem.indexOf(u8, fmt, "%")) |sizeStart| std.fmt.parseInt(comptime_int, fmt[sizeStart..]) else 0x1000;
-
-    const trunc_msg = "(msg truncated)";
-    var buf: [size + trunc_msg.len]u8 = undefined;
-    @memset(&buf, 0);
-
-    var stream = std.io.fixedBufferStream(buf[0..size]);
-    const result = self.ptrFormat(self, options, &stream);
-
-    if (result == error.NoSpaceLeft) {
-        @memcpy(buf[size..], trunc_msg);
-        try writer.writeAll(&buf);
-    } else if (result == error.InvalidCast) {
-        std.debug.panic("Failed to cast {s}", .{self.type});
-    } else {
-        const end = std.mem.indexOf(u8, &buf, &[_]u8{0}) orelse buf.len;
-        try writer.writeAll(buf[0..end]);
-    }
+pub inline fn format(self: *const Self, comptime _: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+    return self.ptrFormat(self, options, Anywriter.init(writer).writer()) catch |err| std.debug.panic("Anywriter failed: {s}", .{@errorName(err)});
 }
 
 test "Casting integers and floats" {
