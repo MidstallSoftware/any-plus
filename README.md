@@ -6,4 +6,4 @@ Any+ is a Zig library for handling anytypes in the runtime.
 
 - [x] Runtime `anytype`
 - [ ] Any-reader
-- [ ] Any-writer
+- [x] Any-writer
