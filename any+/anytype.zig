@@ -10,6 +10,19 @@ size: usize = 0,
 ptr: ?*anyopaque,
 ptrFormat: PointerFormat,
 
+pub fn Casted(comptime T: type) type {
+    return switch (@typeInfo(T)) {
+        .Pointer => |p| blk: {
+            var t = @typeInfo(*Casted(p.child)).Pointer;
+            t.is_const = p.is_const;
+            t.is_volatile = p.is_volatile;
+            break :blk @Type(.{ .Pointer = t });
+        },
+        .Array => |a| []a.child,
+        else => T,
+    };
+}
+
 /// Initializes a runtime anytype from a comptime anytype.
 pub inline fn init(value: anytype) Self {
     return initExplicit(@TypeOf(value), value);
@@ -20,8 +33,8 @@ pub inline fn initExplicit(comptime T: type, value: T) Self {
     var size: usize = @sizeOf(T);
     var ptrFormat: PointerFormat = (struct {
         fn func(t: *const Self, options: std.fmt.FormatOptions, writer: Anywriter.Writer) !void {
-            const self: T = t.cast(T) catch return error.NoSpaceLeft;
-            return std.fmt.formatType(self, "", options, writer, 3);
+            const self = t.cast(Casted(T)) catch return error.NoSpaceLeft;
+            return std.fmt.formatType(self, "any", options, writer, 3);
         }
     }).func;
 
@@ -32,7 +45,7 @@ pub inline fn initExplicit(comptime T: type, value: T) Self {
         .Struct, .Union => blk: {
             ptrFormat = (struct {
                 fn func(t: *const Self, options: std.fmt.FormatOptions, writer: Anywriter.Writer) !void {
-                    const self: T = t.cast(T) catch return error.NoSpaceLeft;
+                    const self = t.cast(Casted(T)) catch return error.NoSpaceLeft;
                     return if (@hasDecl(T, "format")) self.format("", options, writer) else std.fmt.formatType(self, "", options, writer, 3);
                 }
             }).func;
@@ -43,13 +56,13 @@ pub inline fn initExplicit(comptime T: type, value: T) Self {
                 size = value.len * @sizeOf(p.child);
                 break :blk @ptrCast(@constCast(value.ptr));
             },
-            else => |f| @compileError("Unsupported pointer type: " ++ @tagName(f)),
+            else => @ptrCast(@constCast(value)),
         },
         else => |f| @compileError("Unsupported type: " ++ @tagName(f)),
     };
 
     return .{
-        .type = @typeName(T),
+        .type = @typeName(Casted(T)),
         .size = size,
         .ptr = ptr,
         .ptrFormat = ptrFormat,
@@ -59,6 +72,7 @@ pub inline fn initExplicit(comptime T: type, value: T) Self {
 /// Safely casts from the anytype to the real type.
 /// This returns an error if the cast cannot be made safely.
 pub inline fn cast(self: Self, comptime T: type) error{InvalidCast}!T {
+    std.debug.print("{s} == {s}\n", .{ self.type, @typeName(T) });
     if (!std.mem.eql(u8, self.type, @typeName(T))) return error.InvalidCast;
     return self.unsafeCast(T);
 }
@@ -68,13 +82,20 @@ pub inline fn unsafeCast(self: Self, comptime T: type) T {
     return switch (@typeInfo(T)) {
         .Int, .ComptimeInt => @intCast(@intFromPtr(self.ptr)),
         .Float, .ComptimeFloat => @floatCast(@as(f64, @bitCast(@intFromPtr(self.ptr)))),
-        .Enum => |e| @enumFromInt(@as(e.tag_type, @ptrFromInt(self.ptr))),
+        .Enum => @enumFromInt(@as(usize, @intFromPtr(self.ptr))),
         .Struct, .Union => @as(*T, @ptrCast(@alignCast(self.ptr.?))).*,
         .Pointer => |p| switch (@typeInfo(p.child)) {
             .Array => blk: {
-                break :blk @as([*]p.child, @ptrCast(@alignCast(self.ptr.?)))[0..self.len(T)];
+                // FIXME: this should run when type is "*const []T" but doesn't
+                const t = comptime blkT: {
+                    var info = @typeInfo(*[*]p.child).Pointer;
+                    info.is_const = p.is_const;
+                    info.is_volatile = p.is_volatile;
+                    break :blkT @Type(.{ .Pointer = info });
+                };
+                break :blk (@as(t, @ptrCast(@alignCast(self.ptr.?))))[0..self.len(T)];
             },
-            else => |f| @compileError("Unsupported pointer type: " ++ @tagName(f)),
+            else => @as(*p.child, @ptrCast(@alignCast(self.ptr.?))),
         },
         else => |f| @compileError("Unsupported type: " ++ @tagName(f)),
     };
