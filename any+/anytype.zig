@@ -13,10 +13,16 @@ ptrFormat: PointerFormat,
 pub fn Casted(comptime T: type) type {
     return switch (@typeInfo(T)) {
         .Pointer => |p| blk: {
-            var t = @typeInfo(*Casted(p.child)).Pointer;
-            t.is_const = p.is_const;
-            t.is_volatile = p.is_volatile;
-            break :blk @Type(.{ .Pointer = t });
+            var baseType = @typeInfo(switch (p.size) {
+                .Slice, .Many => []Casted(p.child),
+                .One, .C => *Casted(p.child),
+            }).Pointer;
+
+            baseType.is_const = p.is_const;
+            baseType.is_volatile = p.is_volatile;
+            baseType.alignment = p.alignment;
+            baseType.address_space = p.address_space;
+            break :blk @Type(.{ .Pointer = baseType });
         },
         .Array => |a| []a.child,
         else => T,
@@ -51,12 +57,16 @@ pub inline fn initExplicit(comptime T: type, value: T) Self {
             }).func;
             break :blk @constCast(&value);
         },
-        .Pointer => |p| switch (@typeInfo(p.child)) {
-            .Array => blk: {
+        .Array => |a| blk: {
+            size = value.len * @sizeOf(a.child);
+            break :blk @ptrCast(@constCast(&value));
+        },
+        .Pointer => |p| switch (p.size) {
+            .Many, .Slice => blk: {
                 size = value.len * @sizeOf(p.child);
-                break :blk @ptrCast(@constCast(value.ptr));
+                break :blk @ptrCast(@constCast(value));
             },
-            else => @ptrCast(@constCast(value)),
+            .One, .C => @ptrCast(@constCast(value)),
         },
         else => |f| @compileError("Unsupported type: " ++ @tagName(f)),
     };
@@ -72,7 +82,6 @@ pub inline fn initExplicit(comptime T: type, value: T) Self {
 /// Safely casts from the anytype to the real type.
 /// This returns an error if the cast cannot be made safely.
 pub inline fn cast(self: Self, comptime T: type) error{InvalidCast}!T {
-    std.debug.print("{s} == {s}\n", .{ self.type, @typeName(T) });
     if (!std.mem.eql(u8, self.type, @typeName(T))) return error.InvalidCast;
     return self.unsafeCast(T);
 }
@@ -84,18 +93,24 @@ pub inline fn unsafeCast(self: Self, comptime T: type) T {
         .Float, .ComptimeFloat => @floatCast(@as(f64, @bitCast(@intFromPtr(self.ptr)))),
         .Enum => @enumFromInt(@as(usize, @intFromPtr(self.ptr))),
         .Struct, .Union => @as(*T, @ptrCast(@alignCast(self.ptr.?))).*,
-        .Pointer => |p| switch (@typeInfo(p.child)) {
-            .Array => blk: {
-                // FIXME: this should run when type is "*const []T" but doesn't
-                const t = comptime blkT: {
-                    var info = @typeInfo(*[*]p.child).Pointer;
-                    info.is_const = p.is_const;
-                    info.is_volatile = p.is_volatile;
-                    break :blkT @Type(.{ .Pointer = info });
-                };
-                break :blk (@as(t, @ptrCast(@alignCast(self.ptr.?))))[0..self.len(T)];
-            },
-            else => @as(*p.child, @ptrCast(@alignCast(self.ptr.?))),
+        .Array => |a| @as([*]a.child, @ptrCast(@alignCast(self.ptr.?)))[0..self.len()],
+        .Pointer => |p| blk: {
+            const t = comptime blkt: {
+                var baseType = @typeInfo(switch (p.size) {
+                    .Many, .Slice => [*]p.child,
+                    .One, .C => *p.child,
+                }).Pointer;
+                baseType.is_const = p.is_const;
+                baseType.is_volatile = p.is_volatile;
+                baseType.alignment = p.alignment;
+                baseType.address_space = p.address_space;
+                break :blkt @Type(.{ .Pointer = baseType });
+            };
+
+            break :blk switch (p.size) {
+                .Many, .Slice => @as(t, @ptrCast(@alignCast(self.ptr.?)))[0..self.len(T)],
+                .One, .C => @as(t, @ptrCast(@alignCast(self.ptr.?))),
+            };
         },
         else => |f| @compileError("Unsupported type: " ++ @tagName(f)),
     };
@@ -106,6 +121,7 @@ pub inline fn unsafeCast(self: Self, comptime T: type) T {
 pub inline fn len(self: Self, comptime T: type) usize {
     const size = switch (@typeInfo(T)) {
         .Pointer => |p| @sizeOf(p.child),
+        .Array => |a| @sizeOf(a.child),
         else => @sizeOf(T),
     };
 
