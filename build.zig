@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
     const no_docs = b.option(bool, "no-docs", "skip installing documentation") orelse false;
 
     _ = b.addModule("any+", .{
-        .source_file = .{ .path = b.pathFromRoot("any+.zig") },
+        .root_source_file = .{ .path = b.pathFromRoot("any+.zig") },
     });
 
     const step_test = b.step("test", "Run all unit tests");
